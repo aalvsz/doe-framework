@@ -1,0 +1,10 @@
+setup.py
+idkDOE.egg-info/PKG-INFO
+idkDOE.egg-info/SOURCES.txt
+idkDOE.egg-info/dependency_links.txt
+idkDOE.egg-info/requires.txt
+idkDOE.egg-info/top_level.txt
+idkdoe/__init__.py
+idkdoe/model.py
+idkdoe/sampling_methods.py
+idkdoe/utils.py
