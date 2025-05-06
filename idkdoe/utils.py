@@ -6,19 +6,19 @@ import pandas as pd
 from typing import List, Dict
 
 
-def _save_results(model, output_path, output_prefix: str):
+def _save_results(model, output_path, output_prefix: str, inputs_df, outputs_df):
     """Guarda los resultados en archivos CSV."""
     # Crear la carpeta si no existe
     os.makedirs(output_path, exist_ok=True)
 
     # Guardar inputs
     inputs_path = os.path.join(output_path, f"{output_prefix}_inputs.csv")
-    model.inputs_df.to_csv(inputs_path, index=False, sep=';', decimal=',')
+    inputs_df.to_csv(inputs_path, index=False, sep=';', decimal=',')
 
     # Guardar outputs si hay datos
     if not model.outputs_df.empty:
         outputs_path = os.path.join(output_path, f"{output_prefix}_outputs.csv")
-        model.outputs_df.to_csv(outputs_path, index=False, sep=';', decimal=',')
+        outputs_df.to_csv(outputs_path, index=False, sep=';', decimal=',')
 
 
 def _scale_samples(samples: List[Dict]) -> pd.DataFrame:
