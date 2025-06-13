@@ -5,22 +5,6 @@ from sklearn.decomposition import PCA
 import pandas as pd 
 from typing import List, Dict
 
-
-def _save_results(model, output_path, output_prefix: str, inputs_df, outputs_df):
-    """Guarda los resultados en archivos CSV."""
-    # Crear la carpeta si no existe
-    os.makedirs(output_path, exist_ok=True)
-
-    # Guardar inputs
-    inputs_path = os.path.join(output_path, f"{output_prefix}_inputs.csv")
-    inputs_df.to_csv(inputs_path, index=False, sep=';', decimal=',')
-
-    # Guardar outputs si hay datos
-    if not model.outputs_df.empty:
-        outputs_path = os.path.join(output_path, f"{output_prefix}_outputs.csv")
-        outputs_df.to_csv(outputs_path, index=False, sep=';', decimal=',')
-
-
 def _scale_samples(samples: List[Dict]) -> pd.DataFrame:
         """Escala cada variable a [0,1] para visualización."""
         df = pd.DataFrame(samples)
@@ -35,7 +19,7 @@ def _scale_samples(samples: List[Dict]) -> pd.DataFrame:
                 df[col] = (df[col] - mins[col]) / ranges[col]
         return df
 
-def _visualize_samples(samples: List[Dict], variable_names: List[str]):
+def _visualize_samples(samples: List[Dict], variable_names: List[str], output_path: str):
     """Visualiza las muestras escaladas: scatter o coordenadas paralelas."""
     df_scaled = _scale_samples(samples)
     if df_scaled.shape[1] <= 6:
@@ -59,4 +43,4 @@ def _visualize_samples(samples: List[Dict], variable_names: List[str]):
         plt.ylabel('Valor normalizado')
         plt.legend([], [])
         plt.tight_layout()
-        plt.show()
+        plt.savefig(os.path.join(output_path, "parallel_coordinates_plot.png"), dpi=300)

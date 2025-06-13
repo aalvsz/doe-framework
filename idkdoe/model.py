@@ -1,3 +1,7 @@
+import os
+import csv
+import time
+import multiprocessing
 import pandas as pd
 import pickle
 import warnings
@@ -11,8 +15,29 @@ from idkdoe.sampling_methods import (
     _sobol_sampling,
     _halton_sampling
 )
-from idkdoe.utils import _save_results, _visualize_samples
+from idkdoe.utils import _visualize_samples
+from joblib import Parallel, delayed
 
+def _run_single_simulation(model_pickle, sample):
+            import pickle
+            import pandas as pd
+
+            model = pickle.loads(model_pickle)
+            try:
+                result = model.idk_run(sample)
+                if isinstance(result, pd.DataFrame):
+                    row = result.to_dict(orient='records')[0]
+                elif isinstance(result, dict):
+                    row = result
+                elif isinstance(result, tuple) and isinstance(result[0], dict):
+                    row = result[0]
+                else:
+                    row = dict(result)
+                return sample, row
+            except Exception as e:
+                print(f"Error en simulación con muestra {sample}: {e}")
+                return sample, {}
+            
 class idkDOE:
     def __init__(self, config_dict: Dict, model):
         """Inicializa el proyecto idkDOE cargando el dict de configuración."""
@@ -22,6 +47,22 @@ class idkDOE:
         self.outputs_df = pd.DataFrame()
         self._validate_config()
         self._prepare_variables()
+
+    def _append_row_to_csv(self, result_dict, save_path):
+        """Escribe una fila al archivo CSV de resultados de forma dinámica."""
+        outputs_csv = os.path.join(save_path, "DOE_outputs.csv")
+        row_dict = result_dict.copy()
+
+        # Si el archivo no existe, crear con encabezados
+        if not os.path.exists(outputs_csv):
+            with open(outputs_csv, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=row_dict.keys())
+                writer.writeheader()
+                writer.writerow(row_dict)
+        else:
+            with open(outputs_csv, 'a', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=row_dict.keys())
+                writer.writerow(row_dict)
 
     def _validate_config(self):
         """Valida la configuración cargada y los intervalos de variables."""
@@ -139,22 +180,35 @@ class idkDOE:
                 rec[self.variable_names[idx]] = disc_samples[i][j]
             samples.append(rec)
 
+        # Guardar los samples generados en CSV
+        n_configs = self.config['analysis']['params'].get('n_configs', 1)
+        chunk_size = int(np.ceil(len(samples) / n_configs))
+
+        for i in range(n_configs):
+            chunk = samples[i * chunk_size: (i + 1) * chunk_size]
+            chunk_df = pd.DataFrame(chunk)
+            samples_path = self.config['analysis']['params']['tracking']['path']
+
+            chunk_df.to_csv(f"{samples_path}/DOE_inputs_{method}_part{i+1}.csv", index=False)
+            print(f"Muestras guardadas en: DOE_inputs_{method}_part{i+1}.csv")
+
         return samples
 
-    def run_simulations(self, samples: List[Dict], output_prefix: str = "results"):
-        """Ejecuta las simulaciones para cada muestra y guarda los resultados."""
-        # Inicialización de dataframes de IO
+    
+    def run_simulations(self, samples: List[Dict], output_prefix: str = "results", parallel: bool = False, n_workers=None):
+        """Ejecuta las simulaciones en serie o en paralelo y guarda los resultados, incluyendo errores si ocurren."""
         if self.inputs_df.empty:
             self.inputs_df = pd.DataFrame(columns=self.variable_names)
         if self.outputs_df.empty:
             self.outputs_df = pd.DataFrame()
 
-        output_cols = None  # guardará las columnas de salida esperadas
-        for i, sample in enumerate(samples):
-            print(f"Ejecutando simulación {i+1}/{len(samples)}...")
+        start_time = time.perf_counter()
+
+        results = []
+
+        def safe_simulation(sample):
             try:
                 result = self.model.idk_run(sample)
-                # Convertir el resultado a dict si no lo es
                 if isinstance(result, pd.DataFrame):
                     row = result.to_dict(orient='records')[0]
                 elif isinstance(result, dict):
@@ -162,49 +216,116 @@ class idkDOE:
                 elif isinstance(result, tuple) and isinstance(result[0], dict):
                     row = result[0]
                 else:
-                    # Si es otro tipo, intentar convertir
                     row = dict(result)
-                # Capturar columnas de salida la primera vez
-                if output_cols is None:
-                    output_cols = list(row.keys())
-                # Asegurar que row tenga todas las columnas
-                for col in output_cols:
-                    row.setdefault(col, 0)
             except Exception as e:
-                print(f"Error en simulación {i+1}: {e}")
-                # Si ya conocemos las columnas de salida, crear fila de ceros
-                if output_cols is not None:
-                    row = {col: 0 for col in output_cols}
-                else:
-                    # Columnas desconocidas: crear fila vacía
-                    row = {}
-            # Concatenar inputs y outputs
-            self.inputs_df = pd.concat([self.inputs_df, pd.DataFrame([sample])], ignore_index=True)
-            self.outputs_df = pd.concat([self.outputs_df, pd.DataFrame([row])], ignore_index=True)
-            _save_results(self, self.config['analysis']['params']['tracking']['path'], output_prefix, self.inputs_df, self.outputs_df)
+                print(f"Error en simulación con muestra {sample}: {e}")
+                row = {k: None for k in sample.keys()}
+                row["error"] = str(e)
+            return sample, row
+
+        if parallel:
+            print("Ejecutando simulaciones en paralelo con joblib...")
+            model_pickle = pickle.dumps(self.model)
+
+            def parallel_safe_simulation(sample):
+                try:
+                    model = pickle.loads(model_pickle)
+                    result = model.idk_run(sample)
+                    if isinstance(result, pd.DataFrame):
+                        row = result.to_dict(orient='records')[0]
+                    elif isinstance(result, dict):
+                        row = result
+                    elif isinstance(result, tuple) and isinstance(result[0], dict):
+                        row = result[0]
+                    else:
+                        row = dict(result)
+                except Exception as e:
+                    print(f"Error en simulación con muestra {sample}: {e}")
+                    row = {k: None for k in sample.keys()}
+                    row["error"] = str(e)
+                return sample, row
+
+            raw_results = Parallel(n_jobs=n_workers or -1, backend="loky", verbose=10)(
+                delayed(parallel_safe_simulation)(sample) for sample in samples
+            )
+
+            for i, (sample, row) in enumerate(raw_results, 1):
+                print(f"Simulación {i}/{len(samples)} completada.")
+                try:
+                    self._append_row_to_csv(row, self.config['analysis']['params']['tracking']['path'])
+                    results.append((sample, row))
+                except Exception as e:
+                    print(f"Error al guardar resultado de muestra {i}: {e}")
+
+        else:
+            for i, sample in enumerate(samples):
+                print(f"Ejecutando simulación {i+1}/{len(samples)}...")
+                _, row = safe_simulation(sample)
+                try:
+                    self._append_row_to_csv(row, self.config['analysis']['params']['tracking']['path'])
+                    results.append((sample, row))
+                except Exception as e:
+                    print(f"Error al guardar resultado de muestra {i+1}: {e}")
+
+        end_time = time.perf_counter()
+        elapsed_time = end_time - start_time
+
+        n_evaluations = len(samples)
+        n_cpus = multiprocessing.cpu_count()
+        n_processes = n_workers if parallel and n_workers is not None else (n_cpus if parallel else 1)
+        exec_mode = "Paralelo" if parallel else "Secuencial"
+        save_path = self.config['analysis']['params']['tracking']['path']
+
+        summary_text = (
+            f"Resumen de la simulación DOE\n"
+            f"----------------------------\n"
+            f"Tiempo transcurrido (segundos): {elapsed_time:.2f}\n"
+            f"Número total de evaluaciones: {n_evaluations}\n"
+            f"Modo de ejecución: {exec_mode}\n"
+            f"Número de procesos paralelos usados: {n_processes}\n"
+            f"Número total de CPUs disponibles: {n_cpus}\n"
+            f"Ruta de guardado: {save_path}\n"
+        )
+
+        resumen_path = os.path.join(save_path, f"{output_prefix}_summary.txt")
+        with open(resumen_path, 'w') as f:
+            f.write(summary_text)
+
+        print("\n" + summary_text)
+
+
+    def run_doe_from_csv(
+        self,
+        input_csv: str,
+        output_prefix: str = "results",
+        parallel: bool = False,
+        n_workers: int = None
+    ):
+        """Permite ejecutar simulaciones usando un archivo CSV específico de muestras."""
+        samples_path = self.config['analysis']['params']['tracking']['path']
+        full_path = os.path.join(samples_path, input_csv)
+
+        if not os.path.exists(full_path):
+            raise FileNotFoundError(f"No se encontró el archivo: {full_path}")
+
+        samples_df = pd.read_csv(full_path)
+        samples = samples_df.to_dict(orient='records')
+
+        print(f"Ejecutando simulaciones desde archivo: {input_csv}")
+        self.run_simulations(samples, output_prefix, parallel, n_workers)
+
 
     def run_doe(
         self,
         method: str = 'LHS',
         n_samples: int = 10,
         output_prefix: str = "results",
+        parallel: bool = False,
+        n_workers: int = None,
         **kwargs
     ):
         """Ejecuta todo el proceso de DOE con confirmación y visualización adecuada."""
-        evaluate = kwargs.pop('evaluate', True)
-        while True:
-            samples = self.generate_samples(method, n_samples, **kwargs)
-            _visualize_samples(samples, self.variable_names)
-
-            if not evaluate:
-                print("Evaluación desactivada: finalizando sin simulaciones.")
-                return
-            choice = input("¿Evaluar en todos estos puntos? (Y/N): ")
-            if choice.lower() == 'y':
-                break
-            if choice.lower() != 'n':
-                print("Opción no válida. Ingresa 'Y' o 'N'.")
-            else:
-                print("Remuestreando...")
-        self.run_simulations(samples, output_prefix)
+        samples = self.generate_samples(method, n_samples, **kwargs)
+        _visualize_samples(samples, self.variable_names, self.config['analysis']['params']['tracking']['path'])
+        self.run_simulations(samples, output_prefix, parallel, n_workers)
         print("Simulaciones completadas. Resultados guardados.")
