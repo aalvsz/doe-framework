@@ -18,26 +18,7 @@ from idkdoe.sampling_methods import (
 from idkdoe.utils import _visualize_samples
 from joblib import Parallel, delayed
 
-def _run_single_simulation(model_pickle, sample):
-            import pickle
-            import pandas as pd
 
-            model = pickle.loads(model_pickle)
-            try:
-                result = model.idk_run(sample)
-                if isinstance(result, pd.DataFrame):
-                    row = result.to_dict(orient='records')[0]
-                elif isinstance(result, dict):
-                    row = result
-                elif isinstance(result, tuple) and isinstance(result[0], dict):
-                    row = result[0]
-                else:
-                    row = dict(result)
-                return sample, row
-            except Exception as e:
-                print(f"Error en simulación con muestra {sample}: {e}")
-                return sample, {}
-            
 class idkDOE:
     def __init__(self, config_dict: Dict, model):
         """Inicializa el proyecto idkDOE cargando el dict de configuración."""
@@ -52,7 +33,7 @@ class idkDOE:
         """Escribe una fila al archivo CSV de resultados de forma dinámica."""
         outputs_csv = os.path.join(save_path, "DOE_outputs.csv")
         row_dict = result_dict.copy()
-
+    
         # Si el archivo no existe, crear con encabezados
         if not os.path.exists(outputs_csv):
             with open(outputs_csv, 'w', newline='') as f:
@@ -181,30 +162,47 @@ class idkDOE:
             samples.append(rec)
 
         # Guardar los samples generados en CSV
+        n_samples_total = len(samples)
+        chunks_fractions = self.config['analysis']['params'].get('chunks', None)
         n_configs = self.config['analysis']['params'].get('n_configs', 1)
-        chunk_size = int(np.ceil(len(samples) / n_configs))
 
-        for i in range(n_configs):
-            chunk = samples[i * chunk_size: (i + 1) * chunk_size]
+        if chunks_fractions:
+            if not np.isclose(sum(chunks_fractions), 1.0):
+                raise ValueError(f"La suma de 'chunks' debe ser 1.0, pero es {sum(chunks_fractions)}")
+            if len(chunks_fractions) != n_configs:
+                raise ValueError(f"Se esperaban {n_configs} fracciones en 'chunks', pero se dieron {len(chunks_fractions)}")
+
+            chunk_sizes = [int(round(frac * n_samples_total)) for frac in chunks_fractions]
+            # Ajustar el último chunk para asegurar suma total exacta
+            chunk_sizes[-1] = n_samples_total - sum(chunk_sizes[:-1])
+        else:
+            chunk_size = int(np.ceil(n_samples_total / n_configs))
+            chunk_sizes = [chunk_size] * n_configs
+            chunk_sizes[-1] = n_samples_total - chunk_size * (n_configs - 1)
+
+        start = 0
+        for i, size in enumerate(chunk_sizes):
+            chunk = samples[start: start + size]
+            start += size
             chunk_df = pd.DataFrame(chunk)
             samples_path = self.config['analysis']['params']['tracking']['path']
-
             chunk_df.to_csv(f"{samples_path}/DOE_inputs_{method}_part{i+1}.csv", index=False)
-            print(f"Muestras guardadas en: DOE_inputs_{method}_part{i+1}.csv")
+            print(f"{len(chunk)} muestras guardadas en: DOE_inputs_{method}_part{i+1}.csv")
+
 
         return samples
 
     
-    def run_simulations(self, samples: List[Dict], output_prefix: str = "results", parallel: bool = False, n_workers=None):
-        """Ejecuta las simulaciones en serie o en paralelo y guarda los resultados, incluyendo errores si ocurren."""
+    def run_simulations(self, samples: List[Dict], parallel: bool = False, n_workers=None):
+        """Ejecuta las simulaciones en serie o en paralelo y guarda los resultados dinámicamente."""
         if self.inputs_df.empty:
             self.inputs_df = pd.DataFrame(columns=self.variable_names)
         if self.outputs_df.empty:
             self.outputs_df = pd.DataFrame()
 
         start_time = time.perf_counter()
-
         results = []
+        save_path = self.config['analysis']['params']['tracking']['path']
 
         def safe_simulation(sample):
             try:
@@ -224,10 +222,10 @@ class idkDOE:
             return sample, row
 
         if parallel:
-            print("Ejecutando simulaciones en paralelo con joblib...")
+            print("Ejecutando simulaciones en paralelo con joblib (escritura dinámica)...")
             model_pickle = pickle.dumps(self.model)
 
-            def parallel_safe_simulation(sample):
+            def process_and_save(sample, i):
                 try:
                     model = pickle.loads(model_pickle)
                     result = model.idk_run(sample)
@@ -243,26 +241,24 @@ class idkDOE:
                     print(f"Error en simulación con muestra {sample}: {e}")
                     row = {k: None for k in sample.keys()}
                     row["error"] = str(e)
+
+                # Guardar dinámicamente en el proceso principal
+                self._append_row_to_csv(row, save_path)
+                print(f"Simulación {i+1}/{len(samples)} completada.")
                 return sample, row
 
+            from joblib import Parallel, delayed
             raw_results = Parallel(n_jobs=n_workers or -1, backend="loky", verbose=10)(
-                delayed(parallel_safe_simulation)(sample) for sample in samples
+                delayed(process_and_save)(sample, i) for i, sample in enumerate(samples)
             )
-
-            for i, (sample, row) in enumerate(raw_results, 1):
-                print(f"Simulación {i}/{len(samples)} completada.")
-                try:
-                    self._append_row_to_csv(row, self.config['analysis']['params']['tracking']['path'])
-                    results.append((sample, row))
-                except Exception as e:
-                    print(f"Error al guardar resultado de muestra {i}: {e}")
+            results.extend(raw_results)
 
         else:
             for i, sample in enumerate(samples):
                 print(f"Ejecutando simulación {i+1}/{len(samples)}...")
                 _, row = safe_simulation(sample)
                 try:
-                    self._append_row_to_csv(row, self.config['analysis']['params']['tracking']['path'])
+                    self._append_row_to_csv(row, save_path)
                     results.append((sample, row))
                 except Exception as e:
                     print(f"Error al guardar resultado de muestra {i+1}: {e}")
@@ -274,7 +270,6 @@ class idkDOE:
         n_cpus = multiprocessing.cpu_count()
         n_processes = n_workers if parallel and n_workers is not None else (n_cpus if parallel else 1)
         exec_mode = "Paralelo" if parallel else "Secuencial"
-        save_path = self.config['analysis']['params']['tracking']['path']
 
         summary_text = (
             f"Resumen de la simulación DOE\n"
@@ -287,32 +282,29 @@ class idkDOE:
             f"Ruta de guardado: {save_path}\n"
         )
 
-        resumen_path = os.path.join(save_path, f"{output_prefix}_summary.txt")
+        resumen_path = os.path.join(save_path, "DOE_summary.txt")
         with open(resumen_path, 'w') as f:
             f.write(summary_text)
 
         print("\n" + summary_text)
 
 
+
     def run_doe_from_csv(
         self,
         input_csv: str,
-        output_prefix: str = "results",
         parallel: bool = False,
         n_workers: int = None
     ):
         """Permite ejecutar simulaciones usando un archivo CSV específico de muestras."""
-        samples_path = self.config['analysis']['params']['tracking']['path']
-        full_path = os.path.join(samples_path, input_csv)
+        if not os.path.exists(input_csv):
+            raise FileNotFoundError(f"No se encontró el archivo: {input_csv}")
 
-        if not os.path.exists(full_path):
-            raise FileNotFoundError(f"No se encontró el archivo: {full_path}")
-
-        samples_df = pd.read_csv(full_path)
+        samples_df = pd.read_csv(input_csv)
         samples = samples_df.to_dict(orient='records')
 
         print(f"Ejecutando simulaciones desde archivo: {input_csv}")
-        self.run_simulations(samples, output_prefix, parallel, n_workers)
+        self.run_simulations(samples, parallel, n_workers)
 
 
     def run_doe(
@@ -327,5 +319,5 @@ class idkDOE:
         """Ejecuta todo el proceso de DOE con confirmación y visualización adecuada."""
         samples = self.generate_samples(method, n_samples, **kwargs)
         _visualize_samples(samples, self.variable_names, self.config['analysis']['params']['tracking']['path'])
-        self.run_simulations(samples, output_prefix, parallel, n_workers)
+        self.run_simulations(samples, parallel, n_workers)
         print("Simulaciones completadas. Resultados guardados.")
