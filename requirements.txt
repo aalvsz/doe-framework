@@ -1,7 +1,0 @@
-idkdoe==0.1.0
-importlib-metadata==8.0.0
-jaraco.collections==5.1.0
-pip-chill==1.0.3
-pipreqs==0.5.0
-tinycss2==1.4.0
-tomli==2.0.1
