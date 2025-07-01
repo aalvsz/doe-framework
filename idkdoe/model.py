@@ -29,11 +29,11 @@ class idkDOE:
         self._validate_config()
         self._prepare_variables()
 
-    def _append_row_to_csv(self, result_dict, save_path):
-        """Escribe una fila al archivo CSV de resultados de forma dinámica."""
+    def _append_row_to_csv(self, inputs: Dict, outputs: Dict, save_path: str):
+        """Escribe una fila al archivo CSV con inputs + outputs de forma dinámica."""
         outputs_csv = os.path.join(save_path, "DOE_outputs.csv")
-        row_dict = result_dict.copy()
-    
+        row_dict = {**inputs, **outputs}  # combinar inputs y outputs
+
         # Si el archivo no existe, crear con encabezados
         if not os.path.exists(outputs_csv):
             with open(outputs_csv, 'w', newline='') as f:
@@ -44,6 +44,7 @@ class idkDOE:
             with open(outputs_csv, 'a', newline='') as f:
                 writer = csv.DictWriter(f, fieldnames=row_dict.keys())
                 writer.writerow(row_dict)
+
 
     def _validate_config(self):
         """Valida la configuración cargada y los intervalos de variables."""
@@ -243,7 +244,7 @@ class idkDOE:
                     row["error"] = str(e)
 
                 # Guardar dinámicamente en el proceso principal
-                self._append_row_to_csv(row, save_path)
+                self._append_row_to_csv(sample, row, save_path)
                 print(f"Simulación {i+1}/{len(samples)} completada.")
                 return sample, row
 
@@ -258,7 +259,7 @@ class idkDOE:
                 print(f"Ejecutando simulación {i+1}/{len(samples)}...")
                 _, row = safe_simulation(sample)
                 try:
-                    self._append_row_to_csv(row, save_path)
+                    self._append_row_to_csv(sample, row, save_path)
                     results.append((sample, row))
                 except Exception as e:
                     print(f"Error al guardar resultado de muestra {i+1}: {e}")
