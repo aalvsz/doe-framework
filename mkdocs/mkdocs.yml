@@ -1,0 +1,41 @@
+site_name: idkDOE Documentation
+
+nav:
+  - Home: index.md
+  - Description: descriptions.md
+  - Model: model.md
+  - Sampling methods: sampling_methods.md
+  - Utils: utils.md
+
+
+theme:
+  name: material
+
+plugins:
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: ["../src"]
+          options:
+            show_private_members: true
+            filters: []  # <--- ¡Esto permite mostrar TODO sin filtrar!
+
+markdown_extensions:
+  - toc:
+      permalink: true
+  - admonition
+  - codehilite
+  - footnotes
+  - tables
+  - def_list
+  - attr_list
+  - md_in_html
+  - smarty
+  - pymdownx.superfences
+  - pymdownx.details
+  - pymdownx.inlinehilite
+  - pymdownx.emoji
+  - pymdownx.tasklist
+  - pymdownx.highlight
+  - pymdownx.betterem
+  - pymdownx.critic
